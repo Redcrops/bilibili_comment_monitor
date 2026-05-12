@@ -15,7 +15,12 @@ from bilibili_api.user import VideoOrder
 
 from config import AppConfig, load_config
 from encoding_utils import configure_stdio_utf8
-from notify_channels import send_bilibili_dm, send_sms_webhook, send_twilio_sms
+from notify_channels import (
+    send_bilibili_dm,
+    send_feishu_webhook,
+    send_sms_webhook,
+    send_twilio_sms,
+)
 from state_store import MonitorState, load_state, save_state
 
 logger = logging.getLogger(__name__)
@@ -163,6 +168,17 @@ async def _notify(cfg: AppConfig, cred: Credential | None, text: str) -> None:
         except Exception:
             logger.exception("短信 Webhook 请求失败")
 
+    if cfg.notify.feishu_webhook_url:
+        try:
+            await asyncio.to_thread(
+                send_feishu_webhook,
+                cfg.notify.feishu_webhook_url,
+                cfg.notify.feishu_webhook_secret,
+                text,
+            )
+        except Exception:
+            logger.exception("飞书 Webhook 请求失败")
+
     tw = cfg.notify.twilio
     if tw.account_sid and tw.auth_token and tw.from_number and tw.to:
         try:
@@ -225,7 +241,7 @@ async def run_cycle(
             f"内容: {body}\n"
             f"{url}"
         )
-        logger.info("新评论 rpid=%s: %s", r["rpid"], body[:80])
+        logger.info("新评论 rpid=%s 内容:\n%s", r["rpid"], body or "(空)")
         await _notify(cfg, cred, text)
 
     if new_rows:

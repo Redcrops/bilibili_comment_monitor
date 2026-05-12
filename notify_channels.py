@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import base64
+import hashlib
+import hmac
 import json
 import logging
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from bilibili_api.utils.network import Credential
@@ -47,6 +50,55 @@ def send_sms_webhook(url: str, headers: dict[str, str], text: str) -> None:
         return
     _post_json(url, {"text": text, "message": text}, headers)
     logger.info("已请求短信 Webhook")
+
+
+def send_feishu_webhook(url: str, secret: str, text: str) -> None:
+    """飞书群自定义机器人：https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot"""
+    if not url:
+        return
+    payload: dict[str, Any] = {
+        "msg_type": "text",
+        "content": {"text": text},
+    }
+    sec = (secret or "").strip()
+    if sec:
+        ts = str(int(time.time()))
+        string_to_sign = f"{ts}\n{sec}"
+        sign = base64.b64encode(
+            hmac.new(
+                sec.encode("utf-8"),
+                string_to_sign.encode("utf-8"),
+                hashlib.sha256,
+            ).digest()
+        ).decode()
+        payload["timestamp"] = ts
+        payload["sign"] = sign
+
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        raw = resp.read().decode("utf-8")
+        if resp.status >= 400:
+            raise urllib.error.HTTPError(
+                url, resp.status, resp.reason, resp.headers, None
+            )
+        try:
+            out = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            logger.warning("飞书响应非 JSON，已忽略校码: %s", raw[:500])
+            out = {}
+        if "code" in out and int(out["code"]) != 0:
+            raise RuntimeError(f"飞书 webhook 错误 code={out.get('code')}: {raw}")
+        if "StatusCode" in out and int(out["StatusCode"]) != 0:
+            raise RuntimeError(
+                f"飞书 webhook StatusCode={out.get('StatusCode')}: {raw}"
+            )
+    logger.info("已发送到飞书机器人")
 
 
 def send_twilio_sms(

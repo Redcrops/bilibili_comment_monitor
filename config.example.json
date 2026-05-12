@@ -1,5 +1,5 @@
 {
-  "target_mid": 123456,
+  "target_mid": 3690988839110870,
   "poll_interval_seconds": 90,
   "curl_impersonate": "chrome136",
   "enable_bili_ticket": false,
@@ -14,11 +14,13 @@
     "buvid3": "",
     "buvid4": ""
   },
-  "notify": {
-    "bilibili_dm_receiver_uid": 0,
-    "sms_webhook_url": "",
-    "sms_webhook_headers": {},
-    "twilio": {
+    "notify": {
+      "bilibili_dm_receiver_uid": 0,
+      "sms_webhook_url": "",
+      "sms_webhook_headers": {},
+      "feishu_webhook_url": "",
+      "feishu_webhook_secret": "",
+      "twilio": {
       "account_sid": "",
       "auth_token": "",
       "from": "",

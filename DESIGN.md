@@ -89,6 +89,7 @@ flowchart LR
 - **短信**：  
   - `sms_webhook_url`：POST JSON，体包含 `text` 与 `message`（内容相同），便于对接自建网关或国内短信服务商封装。  
   - Twilio：使用 REST，字段见 `config.example.json` 中 `notify.twilio`（发件号码键名为 `from`，加载后映射为 `TwilioConfig.from_number`）。
+- **飞书**：`notify.feishu_webhook_url` 填群自定义机器人的 Webhook 地址（[添加机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)）。若机器人开启了**签名校验**，将 `feishu_webhook_secret` 设为口令中的密钥；未开启可留空 `""`。程序按飞书文档组装 `msg_type: text` 并可选附带 `timestamp` / `sign`。
 
 各通道失败互不影响（各自 try/except 记日志）。
 
@@ -120,6 +121,7 @@ pip install -r requirements.txt
 - `target_mid`：目标 UP 的 mid。
 - 需要私信时：`credential` + `notify.bilibili_dm_receiver_uid`。
 - 需要短信时：`notify.sms_webhook_url` 或 `notify.twilio`。
+- 需要飞书群通知时：`notify.feishu_webhook_url`（及可选 `feishu_webhook_secret`）。
 
 可选：`curl_impersonate`、`enable_bili_ticket`、`comment_scan` 分页上限等。
 

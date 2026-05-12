@@ -38,6 +38,8 @@ class NotifyConfig:
     bilibili_dm_receiver_uid: int = 0
     sms_webhook_url: str = ""
     sms_webhook_headers: dict[str, str] = field(default_factory=dict)
+    feishu_webhook_url: str = ""
+    feishu_webhook_secret: str = ""
     twilio: TwilioConfig = field(default_factory=TwilioConfig)
 
 
@@ -95,6 +97,12 @@ def load_config(path: str | Path) -> AppConfig:
             sms_webhook_headers=dict(
                 _dig(raw, "notify", "sms_webhook_headers", default={}) or {}
             ),
+            feishu_webhook_url=str(
+                _dig(raw, "notify", "feishu_webhook_url", default="") or ""
+            ).strip(),
+            feishu_webhook_secret=str(
+                _dig(raw, "notify", "feishu_webhook_secret", default="") or ""
+            ).strip(),
             twilio=TwilioConfig(
                 account_sid=str(tw.get("account_sid", "") or ""),
                 auth_token=str(tw.get("auth_token", "") or ""),
