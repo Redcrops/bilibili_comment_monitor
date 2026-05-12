@@ -1,0 +1,28 @@
+{
+  "target_mid": 123456,
+  "poll_interval_seconds": 90,
+  "curl_impersonate": "chrome136",
+  "enable_bili_ticket": false,
+  "comment_scan": {
+    "max_pages_per_poll": 3,
+    "bootstrap_max_pages": 15
+  },
+  "credential": {
+    "sessdata": "",
+    "bili_jct": "",
+    "dedeuserid": "",
+    "buvid3": "",
+    "buvid4": ""
+  },
+  "notify": {
+    "bilibili_dm_receiver_uid": 0,
+    "sms_webhook_url": "",
+    "sms_webhook_headers": {},
+    "twilio": {
+      "account_sid": "",
+      "auth_token": "",
+      "from": "",
+      "to": ""
+    }
+  }
+}
