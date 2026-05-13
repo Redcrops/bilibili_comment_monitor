@@ -142,6 +142,7 @@ python monitor.py [-c CONFIG] [--once]
 |------|------|
 | `-c` / `--config` | 配置文件路径，默认当前目录下 `config.json`。 |
 | `--once` | 只执行 **一轮** `run_cycle` 后退出，便于联调；不加则按 `poll_interval_seconds` 循环。 |
+| `--rebootstrap` | 将各 UP 的 `bootstrapped` 置为 `false` 并落盘，**下一轮起重新首轮同步**，再次逐条打印 `[首轮]`（仍不触发通知）；用于想再看一遍历史控制台输出而不删 `state.json`。 |
 
 程序启动时依次：`configure_stdio_utf8()` → 解析参数 → `logging.basicConfig` → `asyncio.run(amain(...))`。
 

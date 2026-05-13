@@ -321,7 +321,12 @@ async def run_cycle(
             logger.exception("UP mid=%s 本轮检查失败", up_mid)
 
 
-async def amain(config_path: Path, once: bool) -> None:
+async def amain(
+    config_path: Path,
+    *,
+    once: bool,
+    rebootstrap: bool,
+) -> None:
     try:
         cfg = load_config(config_path)
     except ValueError as e:
@@ -331,6 +336,22 @@ async def amain(config_path: Path, once: bool) -> None:
     cred = _make_credential(cfg)
     state_path = config_path.resolve().parent / "state.json"
     root = load_state(state_path, cfg.target_mids)
+
+    if rebootstrap:
+        for mid in cfg.target_mids:
+            root.slice_for(mid).bootstrapped = False
+        save_state(state_path, root)
+        logger.info("已启用 --rebootstrap：本轮将对各 UP 重新首轮同步（会再次打印历史 [首轮] 行）")
+
+    if (
+        not rebootstrap
+        and cfg.target_mids
+        and all(root.slice_for(m).bootstrapped for m in cfg.target_mids)
+    ):
+        logger.info(
+            "历史评论只在「首轮同步」打印一次；当前 state 已同步过，故不再刷屏。"
+            " 若要看历史输出可: 删除 state.json，或运行 python monitor.py --rebootstrap"
+        )
 
     logger.info(
         "开始监控 UP mids=%s（最多3个），轮询间隔 %ss",
@@ -359,9 +380,9 @@ def main() -> None:
         help="配置文件路径（默认 ./config.json）",
     )
     parser.add_argument(
-        "--once",
+        "--rebootstrap",
         action="store_true",
-        help="只执行一轮检查（用于联调）",
+        help="将各 UP 标为未首轮同步，下一轮重新扫描评论并打印 [首轮] 历史行（不写通知）",
     )
     args = parser.parse_args()
     config_path = Path(args.config)
@@ -379,7 +400,13 @@ def main() -> None:
         force=True,
     )
     try:
-        asyncio.run(amain(config_path, args.once))
+        asyncio.run(
+            amain(
+                config_path,
+                once=args.once,
+                rebootstrap=args.rebootstrap,
+            )
+        )
     except KeyboardInterrupt:
         logger.info("已退出")
 
