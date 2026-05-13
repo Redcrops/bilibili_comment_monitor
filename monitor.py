@@ -277,26 +277,19 @@ async def _run_cycle_for_up(
 
     for r in rows:
         rid = int(r["rpid"])
+        if rid in seen_at_start:
+            continue
         body = _plain_message((r.get("content") or {}).get("message", ""))
         ts_text = _format_reply_time(r)
-        if rid in seen_at_start:
-            logger.info(
-                "[已记录] %s %s rpid=%s %s",
-                up_uname,
-                ts_text,
-                rid,
-                body or "(空)",
-            )
-        else:
-            logger.info(
-                "[新评论] %s %s rpid=%s %s",
-                up_uname,
-                ts_text,
-                rid,
-                body or "(空)",
-            )
-            new_rows.append(r)
-            state.seen_rpids.add(rid)
+        logger.info(
+            "[新评论] %s %s rpid=%s %s",
+            up_uname,
+            ts_text,
+            rid,
+            body or "(空)",
+        )
+        new_rows.append(r)
+        state.seen_rpids.add(rid)
 
     url = f"https://www.bilibili.com/video/{bvid}"
     for r in new_rows:

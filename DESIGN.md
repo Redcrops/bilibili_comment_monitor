@@ -81,7 +81,7 @@ flowchart LR
 
 - **去重键**：评论 `rpid`（整型），按 UP 存入 `RootState.ups[str(mid)].seen_rpids`。
 - **Bootstrap**：每个 UP 的每个 `bvid` 首次进入监控时，按 `bootstrap_max_pages` 扫描若干页，把所有已出现的 UP 评论 `rpid` 写入 `seen_rpids`，并设 `bootstrapped=True`，**不发送通知**；日志前缀 **`[首轮记录][不通知]`**，并 **打印全文**。
-- **增量轮询**：`bootstrapped` 之后，每轮在最前若干页（`max_pages_per_poll`）中合并该 UP 的评论，对本轮拉取范围内出现的每条 UP 评论：**已在本轮开始前即存在于 `seen_rpids` 的** 打日志 **`[已记录]`** 并打印全文；**本轮新出现的** 打 **`[新评论]`** 并打印全文，再按 `ctime` 排序后逐条通知并写入集合。
+- **增量轮询**：`bootstrapped` 之后，每轮仅对 **新发** UP 评论打日志 **`[新评论]`**（历史已见评论不再重复打印，避免刷屏）；按 `ctime` 排序后逐条通知。
 - **时间**：接口返回的评论 **`ctime`** 为 Unix 秒；终端日志与下发通知正文中的可读时间均为 **`datetime.fromtimestamp`（本机本地时区）**。
 
 ### 4.6 换稿行为
