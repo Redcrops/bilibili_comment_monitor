@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import sys
+from datetime import datetime
 from pathlib import Path
 
 from bilibili_api import Credential, comment, get_client, get_selected_client, user, video
@@ -25,6 +26,24 @@ from state_store import RootState, UpMonitorState, load_state, save_state
 
 logger = logging.getLogger(__name__)
 _TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _reply_ctime_unix(reply: dict) -> int:
+    """B 站评论字段 ctime，一般为秒级 Unix 时间戳。"""
+    raw = reply.get("ctime")
+    try:
+        if raw is None:
+            return 0
+        return int(raw)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _format_reply_time(reply: dict) -> str:
+    ts = _reply_ctime_unix(reply)
+    if ts <= 0:
+        return "未知"
+    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _plain_message(html: str) -> str:
@@ -144,11 +163,14 @@ async def _bootstrap_state(
         for r in ups:
             rid = int(r["rpid"])
             body = _plain_message((r.get("content") or {}).get("message", ""))
+            ts_text = _format_reply_time(r)
             logger.info(
-                "[首轮记录][不通知] UP %s(mid=%s) rpid=%s\n%s",
+                "[首轮记录][不通知] UP %s(mid=%s) rpid=%s 时间=%s(unix=%s)\n%s",
                 up_uname,
                 up_mid,
                 rid,
+                ts_text,
+                _reply_ctime_unix(r) or "-",
                 body or "(空)",
             )
             state.seen_rpids.add(rid)
@@ -258,20 +280,25 @@ async def _run_cycle_for_up(
     for r in rows:
         rid = int(r["rpid"])
         body = _plain_message((r.get("content") or {}).get("message", ""))
+        ts_text = _format_reply_time(r)
         if rid in seen_at_start:
             logger.info(
-                "[已记录] UP %s(mid=%s) rpid=%s\n%s",
+                "[已记录] UP %s(mid=%s) rpid=%s 时间=%s(unix=%s)\n%s",
                 up_uname,
                 up_mid,
                 rid,
+                ts_text,
+                _reply_ctime_unix(r) or "-",
                 body or "(空)",
             )
         else:
             logger.info(
-                "[新评论] UP %s(mid=%s) rpid=%s\n%s",
+                "[新评论] UP %s(mid=%s) rpid=%s 时间=%s(unix=%s)\n%s",
                 up_uname,
                 up_mid,
                 rid,
+                ts_text,
+                _reply_ctime_unix(r) or "-",
                 body or "(空)",
             )
             new_rows.append(r)
@@ -280,8 +307,16 @@ async def _run_cycle_for_up(
     url = f"https://www.bilibili.com/video/{bvid}"
     for r in new_rows:
         body = _plain_message((r.get("content") or {}).get("message", ""))
+        ts_text = _format_reply_time(r)
+        ts_unix = _reply_ctime_unix(r)
+        ts_line = (
+            f"评论时间: {ts_text} (unix={ts_unix})"
+            if ts_unix > 0
+            else "评论时间: 未知"
+        )
         text = (
             f"【UP主新评论】{up_uname} (mid={up_mid})\n"
+            f"{ts_line}\n"
             f"视频: {title}\n"
             f"内容: {body}\n"
             f"{url}"
