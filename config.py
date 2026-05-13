@@ -60,9 +60,13 @@ def _normalize_target_mids(raw: dict[str, Any]) -> list[int]:
     if "target_mids" in raw and isinstance(raw["target_mids"], list):
         xs = [int(x) for x in raw["target_mids"]]
     elif "target_mid" in raw:
-        xs = [int(raw["target_mid"])]
+        v = raw["target_mid"]
+        if isinstance(v, list):
+            xs = [int(x) for x in v]
+        else:
+            xs = [int(v)]
     else:
-        raise ValueError("配置需包含 target_mid（单个）或 target_mids（数组，最多3个）")
+        raise ValueError("配置需包含 target_mid（数字或数组）或 target_mids（数组，最多3个）")
     seen: set[int] = set()
     out: list[int] = []
     for m in xs:
