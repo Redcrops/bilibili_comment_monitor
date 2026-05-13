@@ -21,7 +21,7 @@ from notify_channels import (
     send_sms_webhook,
     send_twilio_sms,
 )
-from state_store import MonitorState, load_state, save_state
+from state_store import RootState, UpMonitorState, load_state, save_state
 
 logger = logging.getLogger(__name__)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -51,7 +51,9 @@ def _setup_http_client(cfg: AppConfig) -> None:
         logger.warning("未选择 HTTP 客户端，请安装 curl_cffi、httpx 或 aiohttp")
         return
     request_settings.set_enable_bili_ticket(cfg.enable_bili_ticket)
-    logger.info("bilibili_api HTTP 客户端: %s, bili_ticket=%s", name, cfg.enable_bili_ticket)
+    logger.info(
+        "bilibili_api HTTP 客户端: %s, bili_ticket=%s", name, cfg.enable_bili_ticket
+    )
     if name == "curl_cffi":
         get_client().set_impersonate(cfg.curl_impersonate)
 
@@ -102,26 +104,31 @@ async def _iter_comment_chunks(
         offset = nxt
 
 
-async def _fetch_latest_video(cfg: AppConfig, cred: Credential | None) -> tuple[str, str]:
-    u = user.User(cfg.target_mid, credential=cred if cred else Credential())
+async def _fetch_latest_video(
+    cred: Credential | None, up_mid: int
+) -> tuple[str, str]:
+    u = user.User(up_mid, credential=cred if cred else Credential())
     res = await u.get_videos(pn=1, ps=1, order=VideoOrder.PUBDATE)
     vlist = res.get("list", {}).get("vlist") or []
     if not vlist:
-        raise RuntimeError("未获取到该 UP 的投稿列表，请检查 target_mid 或网络环境")
+        raise RuntimeError(
+            f"未获取到 mid={up_mid} 的投稿列表，请检查 UID 或网络环境"
+        )
     item = vlist[0]
     return str(item["bvid"]), str(item.get("title", ""))
 
 
-async def _get_up_uname(cfg: AppConfig, cred: Credential | None) -> str:
-    u = user.User(cfg.target_mid, credential=cred if cred else Credential())
+async def _get_up_uname(cred: Credential | None, up_mid: int) -> str:
+    u = user.User(up_mid, credential=cred if cred else Credential())
     info = await u.get_user_info()
     return str(info.get("name", ""))
 
 
 async def _bootstrap_state(
     cfg: AppConfig,
-    state: MonitorState,
+    state: UpMonitorState,
     bvid: str,
+    up_mid: int,
     up_uname: str,
     cred: Credential | None,
 ) -> None:
@@ -133,13 +140,22 @@ async def _bootstrap_state(
         cred,
         cfg.comment_scan.bootstrap_max_pages,
     ):
-        ups = _up_comments_from_replies(chunk.get("replies"), cfg.target_mid)
+        ups = _up_comments_from_replies(chunk.get("replies"), up_mid)
         for r in ups:
-            state.seen_rpids.add(int(r["rpid"]))
+            rid = int(r["rpid"])
+            body = _plain_message((r.get("content") or {}).get("message", ""))
+            logger.info(
+                "[首轮记录][不通知] UP %s(mid=%s) rpid=%s\n%s",
+                up_uname,
+                up_mid,
+                rid,
+                body or "(空)",
+            )
+            state.seen_rpids.add(rid)
         n += 1
     state.bootstrapped = True
     logger.info(
-        "已完成首轮同步（不会回溯通知）UP=%s 视频=%s 扫描约 %s 页 已记录 UP 评论 %s 条",
+        "首轮同步完成 UP=%s 视频=%s 约 %s 页，已记入 UP 评论 %s 条",
         up_uname,
         bvid,
         n,
@@ -194,75 +210,120 @@ async def _notify(cfg: AppConfig, cred: Credential | None, text: str) -> None:
             logger.exception("Twilio 短信发送失败")
 
 
-async def run_cycle(
+async def _run_cycle_for_up(
     cfg: AppConfig,
-    state: MonitorState,
+    root: RootState,
     state_path: Path,
     cred: Credential | None,
+    up_mid: int,
 ) -> None:
-    bvid, title = await _fetch_latest_video(cfg, cred)
-    up_uname = await _get_up_uname(cfg, cred)
+    state = root.slice_for(up_mid)
+    bvid, title = await _fetch_latest_video(cred, up_mid)
+    up_uname = await _get_up_uname(cred, up_mid)
 
     if state.bvid != bvid:
-        logger.info("检测到最新稿件变化: %s -> %s (%s)", state.bvid, bvid, title)
+        logger.info(
+            "[mid=%s] 最新稿件变化: %s -> %s (%s)",
+            up_mid,
+            state.bvid,
+            bvid,
+            title,
+        )
         state.bvid = bvid
         state.seen_rpids.clear()
         state.bootstrapped = False
-        save_state(state_path, state)
+        save_state(state_path, root)
 
     if not state.bootstrapped:
-        await _bootstrap_state(cfg, state, bvid, up_uname, cred)
-        save_state(state_path, state)
+        await _bootstrap_state(cfg, state, bvid, up_mid, up_uname, cred)
+        save_state(state_path, root)
         return
 
     v = video.Video(bvid=bvid, credential=cred if cred else Credential())
     aid = v.get_aid()
-    new_rows: list[dict] = []
+    seen_at_start = set(state.seen_rpids)
+    by_rpid: dict[int, dict] = {}
 
     async for chunk in _iter_comment_chunks(
         aid,
         cred,
         cfg.comment_scan.max_pages_per_poll,
     ):
-        for r in _up_comments_from_replies(chunk.get("replies"), cfg.target_mid):
-            rid = int(r["rpid"])
-            if rid not in state.seen_rpids:
-                new_rows.append(r)
-                state.seen_rpids.add(rid)
+        for r in _up_comments_from_replies(chunk.get("replies"), up_mid):
+            by_rpid[int(r["rpid"])] = r
 
-    new_rows.sort(key=lambda x: int(x.get("ctime", 0)))
+    rows = sorted(by_rpid.values(), key=lambda x: int(x.get("ctime", 0)))
+    new_rows: list[dict] = []
 
+    for r in rows:
+        rid = int(r["rpid"])
+        body = _plain_message((r.get("content") or {}).get("message", ""))
+        if rid in seen_at_start:
+            logger.info(
+                "[已记录] UP %s(mid=%s) rpid=%s\n%s",
+                up_uname,
+                up_mid,
+                rid,
+                body or "(空)",
+            )
+        else:
+            logger.info(
+                "[新评论] UP %s(mid=%s) rpid=%s\n%s",
+                up_uname,
+                up_mid,
+                rid,
+                body or "(空)",
+            )
+            new_rows.append(r)
+            state.seen_rpids.add(rid)
+
+    url = f"https://www.bilibili.com/video/{bvid}"
     for r in new_rows:
         body = _plain_message((r.get("content") or {}).get("message", ""))
-        url = f"https://www.bilibili.com/video/{bvid}"
         text = (
-            f"【UP主新评论】{up_uname}\n"
+            f"【UP主新评论】{up_uname} (mid={up_mid})\n"
             f"视频: {title}\n"
             f"内容: {body}\n"
             f"{url}"
         )
-        logger.info("新评论 rpid=%s 内容:\n%s", r["rpid"], body or "(空)")
         await _notify(cfg, cred, text)
 
     if new_rows:
-        save_state(state_path, state)
+        save_state(state_path, root)
+
+
+async def run_cycle(
+    cfg: AppConfig,
+    root: RootState,
+    state_path: Path,
+    cred: Credential | None,
+) -> None:
+    for up_mid in cfg.target_mids:
+        try:
+            await _run_cycle_for_up(cfg, root, state_path, cred, up_mid)
+        except Exception:
+            logger.exception("UP mid=%s 本轮检查失败", up_mid)
 
 
 async def amain(config_path: Path, once: bool) -> None:
-    cfg = load_config(config_path)
+    try:
+        cfg = load_config(config_path)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        sys.exit(2)
     _setup_http_client(cfg)
     cred = _make_credential(cfg)
     state_path = config_path.resolve().parent / "state.json"
-    state = load_state(state_path)
+    root = load_state(state_path, cfg.target_mids)
 
     logger.info(
-        "开始监控 UP mid=%s，轮询间隔 %ss",
-        cfg.target_mid,
+        "开始监控 UP mids=%s（最多3个），轮询间隔 %ss",
+        cfg.target_mids,
         cfg.poll_interval_seconds,
     )
     while True:
         try:
-            await run_cycle(cfg, state, state_path, cred)
+            await run_cycle(cfg, root, state_path, cred)
         except Exception:
             logger.exception("本轮检查失败")
         if once:
@@ -273,7 +334,7 @@ async def amain(config_path: Path, once: bool) -> None:
 def main() -> None:
     configure_stdio_utf8()
     parser = argparse.ArgumentParser(
-        description="监控指定 UP 最新视频下该 UP 主发表的评论，并发送 B 站私信与短信"
+        description="监控最多3个UP各自最新视频下其本人评论，并可选通知"
     )
     parser.add_argument(
         "-c",
@@ -291,7 +352,7 @@ def main() -> None:
     if not config_path.is_file():
         print(
             f"未找到配置文件: {config_path.resolve()}\n"
-            f"请复制 config.example.json 为 config.json 并修改 target_mid 等字段。",
+            f"请复制 config.example.json 为 config.json，配置 target_mids 或 target_mid。",
             file=sys.stderr,
         )
         sys.exit(1)

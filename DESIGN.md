@@ -4,8 +4,8 @@
 
 在 **不依赖 B 站开放平台商业接口** 的前提下，周期性完成：
 
-1. 解析指定 UP 主（`target_mid`）的 **当前最新公开投稿**（按发布时间倒序取 1 条）。
-2. 在该稿件评论区中，识别 **`member.mid` 等于该 UP `mid` 的评论**（含楼中楼里该 UP 的回复）。
+1. 同时监控 **最多 3 个** UP 主（`target_mids`，或兼容单字段 `target_mid`）；对每个 UP 分别取其 **当前最新公开投稿**（按发布时间倒序取 1 条）。
+2. 在各稿件评论区中，识别 **`member.mid` 等于对应 UP `mid` 的评论**（含楼中楼里该 UP 的回复）。
 3. 对 **首次见到的评论**（以 B 站评论 `rpid` 去重）触发通知：**B 站私信**（可选）与 **短信相关通道**（Webhook / Twilio，可选）。
 
 **非目标**：监听非最新稿、监听普通观众评论、保证评论区全量爬取、绕过风控或破解验证。
@@ -49,7 +49,7 @@ flowchart LR
 |------|------|
 | `monitor.py` | **编排**：读配置、初始化 HTTP 客户端与凭据、加载状态、主循环、`run_cycle`（换稿检测、bootstrap、增量扫描、通知）。 |
 | `config.py` | **配置模型**：`AppConfig` 及子结构；`load_config(path)` 从 JSON 反序列化（UTF-8）。 |
-| `state_store.py` | **持久化**：当前跟进的 `bvid`、已见过的 UP 评论 `rpid` 集合、`bootstrapped` 标记；读写 `state.json`（UTF-8、`ensure_ascii=False`）。 |
+| `state_store.py` | **持久化**：`state.json` 内按 UP 分片 `ups[<mid>]`，每片含 `bvid`、`seen_rpids`、`bootstrapped`；兼容旧版单文件扁平结构（仅当配置为 1 个 UP 时自动迁移）。UTF-8、`ensure_ascii=False`。 |
 | `notify_channels.py` | **通知适配**：`send_bilibili_dm`（异步）；`send_sms_webhook` / `send_twilio_sms`（同步 IO，由 `asyncio.to_thread` 调用）。 |
 | `encoding_utils.py` | **终端编码**：Windows 下尽量将控制台与标准流切到 UTF-8，减少中文日志乱码。 |
 
@@ -71,19 +71,23 @@ flowchart LR
 ### 4.3 何为「UP 的评论」
 
 - 对每一页 `replies` 做 **树展开**（`_flatten_replies`），任意节点满足  
-  `int(reply["member"]["mid"]) == cfg.target_mid` 即视为目标 UP 的发言。
+  `int(reply["member"]["mid"]) == 当前轮询的 up_mid` 即视为该 UP 的发言。
 
-### 4.4 去重与「首轮不落通知」
+### 4.4 多 UP 与轮询顺序
 
-- **去重键**：评论 `rpid`（整型），存入 `MonitorState.seen_rpids`。
-- **Bootstrap**：每个 `bvid` 首次进入监控时，按 `bootstrap_max_pages` 扫描若干页，把所有已出现的 UP 评论 `rpid` 写入 `seen_rpids`，并设 `bootstrapped=True`，**不发送通知**，避免启动时对历史评论刷屏。
-- **增量轮询**：`bootstrapped` 之后，每轮在最前若干页（`max_pages_per_poll`）中找出 `rpid ∉ seen_rpids` 的 UP 评论，按 `ctime` 排序后逐条通知并写入集合。
+- `cfg.target_mids` 为去重后的列表，长度 1～3；`run_cycle` **顺序**处理每个 mid，各自独立的 `UpMonitorState`。某一 UP 抛错仅记日志，不阻塞其余 UP。
 
-### 4.5 换稿行为
+### 4.5 去重与「首轮不落通知」
 
-若最新 `bvid` 与 `state.bvid` 不一致：清空 `seen_rpids`，`bootstrapped=False`，下一循环重新对新稿做 bootstrap。
+- **去重键**：评论 `rpid`（整型），按 UP 存入 `RootState.ups[str(mid)].seen_rpids`。
+- **Bootstrap**：每个 UP 的每个 `bvid` 首次进入监控时，按 `bootstrap_max_pages` 扫描若干页，把所有已出现的 UP 评论 `rpid` 写入 `seen_rpids`，并设 `bootstrapped=True`，**不发送通知**；日志前缀 **`[首轮记录][不通知]`**，并 **打印全文**。
+- **增量轮询**：`bootstrapped` 之后，每轮在最前若干页（`max_pages_per_poll`）中合并该 UP 的评论，对本轮拉取范围内出现的每条 UP 评论：**已在本轮开始前即存在于 `seen_rpids` 的** 打日志 **`[已记录]`** 并打印全文；**本轮新出现的** 打 **`[新评论]`** 并打印全文，再按 `ctime` 排序后逐条通知并写入集合。
 
-### 4.6 通知语义
+### 4.6 换稿行为
+
+对每个 UP：若其最新 `bvid` 与该 UP 分片内的 `state.bvid` 不一致：清空该分片的 `seen_rpids`，`bootstrapped=False`，下一循环重新对该稿做 bootstrap。
+
+### 4.7 通知语义
 
 - **B 站「通知」**：平台无公开「推一条 App 系统通知」API，实现为 **向指定 UID 发私信**（`bilibili_api.session.send_msg`，文本）。需配置 `sessdata`、`bili_jct` 等，`bilibili_dm_receiver_uid > 0`。
 - **短信**：  
@@ -100,7 +104,7 @@ flowchart LR
 | 文件 | 说明 |
 |------|------|
 | `config.json` | 用户配置（不入库，`.gitignore` 建议忽略）。 |
-| `state.json` | 与 **配置文件同目录** 生成/更新（`config_path.parent / "state.json"`），记录进度。 |
+| `state.json` | 与 **配置文件同目录** 生成/更新（`config_path.parent / "state.json"`），`ups` 下按 mid 记录各 UP 的 `bvid` / `seen_rpids` / `bootstrapped`。 |
 
 ---
 
@@ -118,7 +122,7 @@ pip install -r requirements.txt
 
 复制 `config.example.json` 为 `config.json`，至少修改：
 
-- `target_mid`：目标 UP 的 mid。
+- `target_mids`：目标 UP 的 mid 数组（**最多 3 个**，自动去重）。仍可用单个 `target_mid` 兼容旧配置。
 - 需要私信时：`credential` + `notify.bilibili_dm_receiver_uid`。
 - 需要短信时：`notify.sms_webhook_url` 或 `notify.twilio`。
 - 需要飞书群通知时：`notify.feishu_webhook_url`（及可选 `feishu_webhook_secret`）。
@@ -145,8 +149,8 @@ python monitor.py [-c CONFIG] [--once]
 可从其他脚本导入并调用：
 
 - `load_config(path)` → `AppConfig`
-- `asyncio.run(run_cycle(cfg, state, state_path, cred))`  
-  需自行构造 `MonitorState`、`Credential | None` 与 `state` 的加载/保存，一般情况下直接使用 CLI 即可。
+- `asyncio.run(run_cycle(cfg, root_state, state_path, cred))`  
+  需自行构造 `RootState`、`Credential | None` 与状态的加载/保存，一般情况下直接使用 CLI 即可。
 
 ---
 

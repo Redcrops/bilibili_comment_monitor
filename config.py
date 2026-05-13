@@ -6,6 +6,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+_MAX_UPS = 3
+
 
 @dataclass
 class CommentScanConfig:
@@ -45,13 +47,33 @@ class NotifyConfig:
 
 @dataclass
 class AppConfig:
-    target_mid: int
+    target_mids: list[int]
     poll_interval_seconds: int = 90
     curl_impersonate: str = "chrome136"
     enable_bili_ticket: bool = False
     comment_scan: CommentScanConfig = field(default_factory=CommentScanConfig)
     credential: CredentialConfig = field(default_factory=CredentialConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
+
+
+def _normalize_target_mids(raw: dict[str, Any]) -> list[int]:
+    if "target_mids" in raw and isinstance(raw["target_mids"], list):
+        xs = [int(x) for x in raw["target_mids"]]
+    elif "target_mid" in raw:
+        xs = [int(raw["target_mid"])]
+    else:
+        raise ValueError("配置需包含 target_mid（单个）或 target_mids（数组，最多3个）")
+    seen: set[int] = set()
+    out: list[int] = []
+    for m in xs:
+        if m not in seen:
+            seen.add(m)
+            out.append(m)
+    if not out:
+        raise ValueError("target_mids 不能为空")
+    if len(out) > _MAX_UPS:
+        raise ValueError(f"最多支持 {_MAX_UPS} 个 UP 主，当前 {len(out)} 个")
+    return out
 
 
 def _dig(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
@@ -66,9 +88,10 @@ def _dig(d: dict[str, Any], *keys: str, default: Any = None) -> Any:
 def load_config(path: str | Path) -> AppConfig:
     p = Path(path)
     raw = json.loads(p.read_text(encoding="utf-8"))
+    target_mids = _normalize_target_mids(raw)
     tw = _dig(raw, "notify", "twilio", default={}) or {}
     return AppConfig(
-        target_mid=int(raw["target_mid"]),
+        target_mids=target_mids,
         poll_interval_seconds=int(raw.get("poll_interval_seconds", 90)),
         curl_impersonate=str(raw.get("curl_impersonate", "chrome136")),
         enable_bili_ticket=bool(raw.get("enable_bili_ticket", False)),
