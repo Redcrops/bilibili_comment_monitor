@@ -380,6 +380,11 @@ def main() -> None:
         help="配置文件路径（默认 ./config.json）",
     )
     parser.add_argument(
+        "--once",
+        action="store_true",
+        help="只执行一轮检查后退出（用于联调）",
+    )
+    parser.add_argument(
         "--rebootstrap",
         action="store_true",
         help="将各 UP 标为未首轮同步，下一轮重新扫描评论并打印 [首轮] 历史行（不写通知）",
