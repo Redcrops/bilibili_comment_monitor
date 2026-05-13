@@ -165,12 +165,10 @@ async def _bootstrap_state(
             body = _plain_message((r.get("content") or {}).get("message", ""))
             ts_text = _format_reply_time(r)
             logger.info(
-                "[首轮记录][不通知] UP %s(mid=%s) rpid=%s 时间=%s(unix=%s)\n%s",
+                "[首轮] %s %s rpid=%s %s",
                 up_uname,
-                up_mid,
-                rid,
                 ts_text,
-                _reply_ctime_unix(r) or "-",
+                rid,
                 body or "(空)",
             )
             state.seen_rpids.add(rid)
@@ -283,22 +281,18 @@ async def _run_cycle_for_up(
         ts_text = _format_reply_time(r)
         if rid in seen_at_start:
             logger.info(
-                "[已记录] UP %s(mid=%s) rpid=%s 时间=%s(unix=%s)\n%s",
+                "[已记录] %s %s rpid=%s %s",
                 up_uname,
-                up_mid,
-                rid,
                 ts_text,
-                _reply_ctime_unix(r) or "-",
+                rid,
                 body or "(空)",
             )
         else:
             logger.info(
-                "[新评论] UP %s(mid=%s) rpid=%s 时间=%s(unix=%s)\n%s",
+                "[新评论] %s %s rpid=%s %s",
                 up_uname,
-                up_mid,
-                rid,
                 ts_text,
-                _reply_ctime_unix(r) or "-",
+                rid,
                 body or "(空)",
             )
             new_rows.append(r)
@@ -308,17 +302,11 @@ async def _run_cycle_for_up(
     for r in new_rows:
         body = _plain_message((r.get("content") or {}).get("message", ""))
         ts_text = _format_reply_time(r)
-        ts_unix = _reply_ctime_unix(r)
-        ts_line = (
-            f"评论时间: {ts_text} (unix={ts_unix})"
-            if ts_unix > 0
-            else "评论时间: 未知"
-        )
         text = (
-            f"【UP主新评论】{up_uname} (mid={up_mid})\n"
-            f"{ts_line}\n"
-            f"视频: {title}\n"
-            f"内容: {body}\n"
+            f"【UP主新评论】{up_uname}\n"
+            f"{ts_text}\n"
+            f"{title}\n"
+            f"{body}\n"
             f"{url}"
         )
         await _notify(cfg, cred, text)
