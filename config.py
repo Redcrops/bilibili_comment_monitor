@@ -16,6 +16,12 @@ class CommentScanConfig:
 
 
 @dataclass
+class DynamicScanConfig:
+    max_items_per_poll: int = 20
+    max_comment_items_per_poll: int = 5
+
+
+@dataclass
 class CredentialConfig:
     sessdata: str = ""
     bili_jct: str = ""
@@ -52,6 +58,7 @@ class AppConfig:
     curl_impersonate: str = "chrome136"
     enable_bili_ticket: bool = False
     comment_scan: CommentScanConfig = field(default_factory=CommentScanConfig)
+    dynamic_scan: DynamicScanConfig = field(default_factory=DynamicScanConfig)
     credential: CredentialConfig = field(default_factory=CredentialConfig)
     notify: NotifyConfig = field(default_factory=NotifyConfig)
 
@@ -105,6 +112,14 @@ def load_config(path: str | Path) -> AppConfig:
             ),
             bootstrap_max_pages=int(
                 _dig(raw, "comment_scan", "bootstrap_max_pages", default=15)
+            ),
+        ),
+        dynamic_scan=DynamicScanConfig(
+            max_items_per_poll=int(
+                _dig(raw, "dynamic_scan", "max_items_per_poll", default=20)
+            ),
+            max_comment_items_per_poll=int(
+                _dig(raw, "dynamic_scan", "max_comment_items_per_poll", default=5)
             ),
         ),
         credential=CredentialConfig(

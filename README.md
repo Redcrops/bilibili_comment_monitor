@@ -1,6 +1,6 @@
 # bilibili_comment_monitor
 
-周期性监控 **最多 3 个 B 站 UP 主**各自 **当前最新公开稿件** 的评论区：当 **UP 本人**（`member.mid` 与目标 UID 一致）发表新评论时，可将摘要推送到 **飞书群机器人、B 站私信、短信 Webhook、Twilio** 等。
+周期性监控 **最多 3 个 B 站 UP 主**的 **最新稿件评论区**（UP 本人发言）与 **空间动态**（文字内容）。新评论可推送到飞书/私信/短信等；**新动态** 输出到终端并推飞书。
 
 基于 Python 3 与 [bilibili-api-python](https://nemo2011.github.io/bilibili-api/)，评论拉取方式见官方文档中的 [`get_comments_lazy` 示例](https://nemo2011.github.io/bilibili-api/#/examples/comment)。
 
@@ -11,10 +11,12 @@
 | 能力 | 说明 |
 |------|------|
 | 多 UP | `target_mids` 数组，**最多 3 个**（也支持单字段 `target_mid` 或把 `target_mid` 写成数组） |
-| 最新稿 | 每个 UP 按投稿时间取 **1 条最新视频** |
+| 最新稿 | 每个 UP 按投稿时间取 **1 条最新视频**，监控其评论区 UP 本人发言 |
+| 空间动态 | 每个 UP 的空间动态（`get_dynamics_new`），提取文字内容 |
 | 只看 UP 本人 | 含楼中楼里该 UP 的回复 |
 | 去重 | 以评论 `rpid` 为准，换稿会重新首轮同步 |
-| 首轮 / 增量 | 首轮在控制台打印 `[首轮]`（不写通知）；之后仅 **`[新评论]`** 触发通知，避免刷屏 |
+| 首轮 / 增量 | 评论：`[首轮]` / `[新评论]`；动态首轮**仅终端展示最新 1 条**（不推飞书），之后 **`[新动态]`** 才推飞书 |
+| 通知 | **仅新发**评论/动态推飞书；评论还可走私信/短信等；首轮同步一律不推飞书 |
 | 时间 | 使用接口里的 `ctime` 格式化为本地可读时间，并入通知正文 |
 
 更细的架构与状态设计见 [DESIGN.md](DESIGN.md)。
@@ -69,7 +71,7 @@ pip install -r requirements.txt
 |------|------|
 | `-c` / `--config` | 配置文件路径，默认 `config.json` |
 | `--once` | 只执行 **一轮** 检查后退出（联调） |
-| `--rebootstrap` | 将各 UP 标为「未首轮同步」，**下一轮**重新走首轮并再次在终端打印 `[首轮]`（仍不通知）；用于想再看一遍历史输出而不手删 `state.json` |
+| `--rebootstrap` | 重新首轮同步评论与动态，再次打印 `[首轮]` / `[首轮动态]`（仍不通知） |
 
 示例：
 
@@ -88,6 +90,7 @@ python monitor.py --rebootstrap
 |------|------|
 | **target_mids** | 要监控的 UP 主 mid 列表，1～3 个 |
 | **poll_interval_seconds** | 轮询间隔（秒） |
+| **comment_scan** / **dynamic_scan** | 评论分页与动态轮询条数（`max_*`）；动态首轮固定只展示最新 1 条 |
 | **credential** | 浏览器 Cookie（`sessdata` 等）。拉多页评论、发私信时需要；其中 **发私信** 还需 **`bili_jct`** |
 | **notify.bilibili_dm_receiver_uid** | 接收 B 站私信的对方 UID；`>0` 且凭据齐全时发送 |
 | **notify.feishu_webhook_url** / **feishu_webhook_secret** | 飞书群自定义机器人 Webhook；开启签名校验时填写密钥 |
@@ -99,7 +102,7 @@ python monitor.py --rebootstrap
 ## 日志与终端
 
 - Windows 下已尽量将控制台切到 **UTF-8**，避免中文乱码；若仍异常可尝试先执行 `chcp 65001`。
-- **历史评论**仅在每个 UP、每篇当前最新稿的 **首轮同步** 时，以 `[首轮]` 逐条打印一次；已同步后重启程序默认不再重复打印。需要再看一遍历史输出：使用 **`--rebootstrap`**，或删除 **`state.json`**。
+- **历史评论/动态**仅在首轮同步时打印；已同步后重启默认不再重复。需要再看：`python monitor.py --rebootstrap` 或删除 `state.json`。
 
 ---
 

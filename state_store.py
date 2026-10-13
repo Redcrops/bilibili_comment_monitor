@@ -12,12 +12,18 @@ class UpMonitorState:
     bvid: str = ""
     seen_rpids: set[int] = field(default_factory=set)
     bootstrapped: bool = False
+    seen_dynamic_ids: set[str] = field(default_factory=set)
+    dynamics_bootstrapped: bool = False
+    dynamic_comments_bootstrapped: bool = False
 
     def to_json(self) -> dict:
         return {
             "bvid": self.bvid,
             "seen_rpids": sorted(self.seen_rpids),
             "bootstrapped": self.bootstrapped,
+            "seen_dynamic_ids": sorted(self.seen_dynamic_ids),
+            "dynamics_bootstrapped": self.dynamics_bootstrapped,
+            "dynamic_comments_bootstrapped": self.dynamic_comments_bootstrapped,
         }
 
     @classmethod
@@ -28,6 +34,13 @@ class UpMonitorState:
                 int(x) for x in data.get("seen_rpids", []) if x is not None
             ),
             bootstrapped=bool(data.get("bootstrapped", False)),
+            seen_dynamic_ids=set(
+                str(x) for x in data.get("seen_dynamic_ids", []) if x
+            ),
+            dynamics_bootstrapped=bool(data.get("dynamics_bootstrapped", False)),
+            dynamic_comments_bootstrapped=bool(
+                data.get("dynamic_comments_bootstrapped", False)
+            ),
         )
 
 
@@ -60,7 +73,6 @@ def load_state(path: Path, target_mids: list[int]) -> RootState:
     data = json.loads(path.read_text(encoding="utf-8"))
     if "ups" in data and isinstance(data["ups"], dict):
         return RootState.from_json(data)
-    # 旧版单 UP：整份 JSON 即一个 UpMonitorState
     if len(target_mids) == 1:
         only = str(target_mids[0])
         return RootState(ups={only: UpMonitorState.from_json(data)})

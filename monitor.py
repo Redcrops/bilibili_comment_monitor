@@ -15,6 +15,14 @@ from bilibili_api.comment import CommentResourceType, OrderType
 from bilibili_api.user import VideoOrder
 
 from config import AppConfig, load_config
+from dynamic_parser import (
+    dynamic_comment_oid,
+    dynamic_item_id,
+    dynamic_pub_ts,
+    dynamic_type_label,
+    dynamic_url,
+    extract_dynamic_text,
+)
 from encoding_utils import configure_stdio_utf8
 from notify_channels import (
     send_bilibili_dm,
@@ -39,11 +47,14 @@ def _reply_ctime_unix(reply: dict) -> int:
         return 0
 
 
-def _format_reply_time(reply: dict) -> str:
-    ts = _reply_ctime_unix(reply)
-    if ts <= 0:
+def _format_ts(unix: int) -> str:
+    if unix <= 0:
         return "未知"
-    return datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.fromtimestamp(unix).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_reply_time(reply: dict) -> str:
+    return _format_ts(_reply_ctime_unix(reply))
 
 
 def _plain_message(html: str) -> str:
@@ -92,7 +103,8 @@ def _up_comments_from_replies(replies: list | None, up_mid: int) -> list[dict]:
 
 
 async def _iter_comment_chunks(
-    aid: int,
+    oid: int,
+    resource_type: CommentResourceType,
     credential: Credential | None,
     max_pages: int,
 ):
@@ -100,8 +112,8 @@ async def _iter_comment_chunks(
     cred = credential if credential is not None else Credential()
     for _ in range(max(1, max_pages)):
         chunk = await comment.get_comments_lazy(
-            aid,
-            CommentResourceType.VIDEO,
+            oid,
+            resource_type,
             offset=offset,
             order=OrderType.TIME,
             credential=cred,
@@ -143,7 +155,148 @@ async def _get_up_uname(cred: Credential | None, up_mid: int) -> str:
     return str(info.get("name", ""))
 
 
-async def _bootstrap_state(
+async def _fetch_dynamics(
+    cred: Credential | None, up_mid: int, max_items: int
+) -> list[dict]:
+    u = user.User(up_mid, credential=cred if cred else Credential())
+    offset = ""
+    collected: list[dict] = []
+    limit = max(1, max_items)
+    while len(collected) < limit:
+        data = await u.get_dynamics_new(offset)
+        items = data.get("items") or []
+        if not items:
+            break
+        collected.extend(items)
+        if not data.get("has_more"):
+            break
+        next_off = str(data.get("offset") or "")
+        if not next_off or next_off == offset:
+            break
+        offset = next_off
+    return collected[:limit]
+
+
+def _commentable_dynamics(items: list[dict], limit: int) -> list[dict]:
+    rows: list[dict] = []
+    for item in items:
+        if dynamic_comment_oid(item) is not None:
+            rows.append(item)
+        if len(rows) >= max(1, limit):
+            break
+    return rows
+
+
+async def _bootstrap_dynamics(
+    cfg: AppConfig,
+    state: UpMonitorState,
+    up_mid: int,
+    up_uname: str,
+    cred: Credential | None,
+) -> None:
+    u = user.User(up_mid, credential=cred if cred else Credential())
+    data = await u.get_dynamics_new("")
+    items = data.get("items") or []
+
+    if items:
+        latest = items[0]
+        did = dynamic_item_id(latest)
+        if did:
+            ts_text = _format_ts(dynamic_pub_ts(latest))
+            body = extract_dynamic_text(latest)
+            logger.info(
+                "[首轮动态] %s %s id=%s %s",
+                up_uname,
+                ts_text,
+                did,
+                body.replace("\n", " ")[:200] or "(无文字)",
+            )
+        # 同页其余动态静默记入基线，避免下一轮把历史当成「新动态」推飞书
+        for item in items:
+            did = dynamic_item_id(item)
+            if did:
+                state.seen_dynamic_ids.add(did)
+
+    state.dynamics_bootstrapped = True
+    logger.info(
+        "动态首轮 UP=%s：终端展示最新 1 条，基线记入 %s 条（不推飞书）",
+        up_uname,
+        len(items),
+    )
+
+
+async def _poll_dynamics_for_up(
+    cfg: AppConfig,
+    state: UpMonitorState,
+    up_uname: str,
+    cred: Credential | None,
+    up_mid: int,
+) -> bool:
+    if not state.dynamics_bootstrapped:
+        await _bootstrap_dynamics(cfg, state, up_mid, up_uname, cred)
+        return True
+
+    items = await _fetch_dynamics(
+        cred, up_mid, cfg.dynamic_scan.max_items_per_poll
+    )
+    seen_at_start = set(state.seen_dynamic_ids)
+    by_id: dict[str, dict] = {}
+    for item in items:
+        did = dynamic_item_id(item)
+        if did:
+            by_id[did] = item
+
+    rows = sorted(by_id.values(), key=lambda x: dynamic_pub_ts(x))
+    new_rows: list[dict] = []
+    for item in rows:
+        did = dynamic_item_id(item)
+        if not did or did in seen_at_start:
+            continue
+        ts_text = _format_ts(dynamic_pub_ts(item))
+        body = extract_dynamic_text(item)
+        dtype = dynamic_type_label(item)
+        logger.info(
+            "[新动态] %s %s id=%s %s %s",
+            up_uname,
+            ts_text,
+            did,
+            dtype,
+            body.replace("\n", " ")[:200] or "(无文字)",
+        )
+        new_rows.append(item)
+        state.seen_dynamic_ids.add(did)
+
+    for item in new_rows:
+        ts_text = _format_ts(dynamic_pub_ts(item))
+        body = extract_dynamic_text(item)
+        url = dynamic_url(item)
+        text = (
+            f"【UP新动态】{up_uname}\n"
+            f"{ts_text}\n"
+            f"{dynamic_type_label(item)}\n"
+            f"{body}\n"
+            f"{url}"
+        )
+        await _notify_feishu(cfg, text)
+
+    return bool(new_rows)
+
+
+async def _notify_feishu(cfg: AppConfig, text: str) -> None:
+    if not cfg.notify.feishu_webhook_url:
+        return
+    try:
+        await asyncio.to_thread(
+            send_feishu_webhook,
+            cfg.notify.feishu_webhook_url,
+            cfg.notify.feishu_webhook_secret,
+            text,
+        )
+    except Exception:
+        logger.exception("飞书 Webhook 请求失败")
+
+
+async def _bootstrap_comments(
     cfg: AppConfig,
     state: UpMonitorState,
     bvid: str,
@@ -156,6 +309,7 @@ async def _bootstrap_state(
     n = 0
     async for chunk in _iter_comment_chunks(
         aid,
+        CommentResourceType.VIDEO,
         cred,
         cfg.comment_scan.bootstrap_max_pages,
     ):
@@ -206,12 +360,7 @@ async def _notify(cfg: AppConfig, cred: Credential | None, text: str) -> None:
 
     if cfg.notify.feishu_webhook_url:
         try:
-            await asyncio.to_thread(
-                send_feishu_webhook,
-                cfg.notify.feishu_webhook_url,
-                cfg.notify.feishu_webhook_secret,
-                text,
-            )
+            await _notify_feishu(cfg, text)
         except Exception:
             logger.exception("飞书 Webhook 请求失败")
 
@@ -230,34 +379,18 @@ async def _notify(cfg: AppConfig, cred: Credential | None, text: str) -> None:
             logger.exception("Twilio 短信发送失败")
 
 
-async def _run_cycle_for_up(
+async def _poll_comments_for_up(
     cfg: AppConfig,
-    root: RootState,
-    state_path: Path,
-    cred: Credential | None,
+    state: UpMonitorState,
+    bvid: str,
+    title: str,
     up_mid: int,
-) -> None:
-    state = root.slice_for(up_mid)
-    bvid, title = await _fetch_latest_video(cred, up_mid)
-    up_uname = await _get_up_uname(cred, up_mid)
-
-    if state.bvid != bvid:
-        logger.info(
-            "[mid=%s] 最新稿件变化: %s -> %s (%s)",
-            up_mid,
-            state.bvid,
-            bvid,
-            title,
-        )
-        state.bvid = bvid
-        state.seen_rpids.clear()
-        state.bootstrapped = False
-        save_state(state_path, root)
-
+    up_uname: str,
+    cred: Credential | None,
+) -> bool:
     if not state.bootstrapped:
-        await _bootstrap_state(cfg, state, bvid, up_mid, up_uname, cred)
-        save_state(state_path, root)
-        return
+        await _bootstrap_comments(cfg, state, bvid, up_mid, up_uname, cred)
+        return True
 
     v = video.Video(bvid=bvid, credential=cred if cred else Credential())
     aid = v.get_aid()
@@ -266,6 +399,7 @@ async def _run_cycle_for_up(
 
     async for chunk in _iter_comment_chunks(
         aid,
+        CommentResourceType.VIDEO,
         cred,
         cfg.comment_scan.max_pages_per_poll,
     ):
@@ -304,7 +438,189 @@ async def _run_cycle_for_up(
         )
         await _notify(cfg, cred, text)
 
-    if new_rows:
+    return bool(new_rows)
+
+
+async def _scan_dynamic_up_comments(
+    cfg: AppConfig,
+    state: UpMonitorState,
+    item: dict,
+    up_mid: int,
+    up_uname: str,
+    cred: Credential | None,
+    *,
+    max_pages: int,
+    log_prefix: str,
+    notify: bool,
+) -> list[tuple[dict, dict]]:
+    """扫描单条动态评论区 UP 发言；返回 (reply, dynamic_item) 列表。"""
+    oid = dynamic_comment_oid(item)
+    if oid is None:
+        return []
+
+    seen_at_start = set(state.seen_rpids)
+    by_rpid: dict[int, dict] = {}
+    async for chunk in _iter_comment_chunks(
+        oid,
+        CommentResourceType.DYNAMIC_DRAW,
+        cred,
+        max_pages,
+    ):
+        for r in _up_comments_from_replies(chunk.get("replies"), up_mid):
+            by_rpid[int(r["rpid"])] = r
+
+    rows = sorted(by_rpid.values(), key=lambda x: int(x.get("ctime", 0)))
+    found: list[tuple[dict, dict]] = []
+    for r in rows:
+        rid = int(r["rpid"])
+        if rid in seen_at_start:
+            continue
+        body = _plain_message((r.get("content") or {}).get("message", ""))
+        ts_text = _format_reply_time(r)
+        did = dynamic_item_id(item)
+        logger.info(
+            "%s %s %s rpid=%s dynamic=%s %s",
+            log_prefix,
+            up_uname,
+            ts_text,
+            rid,
+            did,
+            body or "(空)",
+        )
+        found.append((r, item))
+        state.seen_rpids.add(rid)
+
+    if notify:
+        for r, dyn in found:
+            body = _plain_message((r.get("content") or {}).get("message", ""))
+            ts_text = _format_reply_time(r)
+            dyn_text = extract_dynamic_text(dyn)
+            text = (
+                f"【UP动态新评论】{up_uname}\n"
+                f"{ts_text}\n"
+                f"{dyn_text}\n"
+                f"{body}\n"
+                f"{dynamic_url(dyn)}"
+            )
+            await _notify(cfg, cred, text)
+
+    return found
+
+
+async def _bootstrap_dynamic_comments(
+    cfg: AppConfig,
+    state: UpMonitorState,
+    up_mid: int,
+    up_uname: str,
+    cred: Credential | None,
+) -> None:
+    items = await _fetch_dynamics(
+        cred, up_mid, cfg.dynamic_scan.max_comment_items_per_poll
+    )
+    targets = _commentable_dynamics(items, cfg.dynamic_scan.max_comment_items_per_poll)
+    n = 0
+    for item in targets:
+        found = await _scan_dynamic_up_comments(
+            cfg,
+            state,
+            item,
+            up_mid,
+            up_uname,
+            cred,
+            max_pages=cfg.comment_scan.bootstrap_max_pages,
+            log_prefix="[首轮动态评论]",
+            notify=False,
+        )
+        n += len(found)
+    state.dynamic_comments_bootstrapped = True
+    logger.info(
+        "动态评论首轮 UP=%s：扫描 %s 条动态，已记入 UP 评论 %s 条",
+        up_uname,
+        len(targets),
+        n,
+    )
+
+
+async def _poll_dynamic_comments_for_up(
+    cfg: AppConfig,
+    state: UpMonitorState,
+    up_uname: str,
+    cred: Credential | None,
+    up_mid: int,
+) -> bool:
+    if not state.dynamic_comments_bootstrapped:
+        await _bootstrap_dynamic_comments(cfg, state, up_mid, up_uname, cred)
+        return True
+
+    items = await _fetch_dynamics(
+        cred, up_mid, cfg.dynamic_scan.max_comment_items_per_poll
+    )
+    targets = _commentable_dynamics(items, cfg.dynamic_scan.max_comment_items_per_poll)
+    changed = False
+    for item in targets:
+        found = await _scan_dynamic_up_comments(
+            cfg,
+            state,
+            item,
+            up_mid,
+            up_uname,
+            cred,
+            max_pages=cfg.comment_scan.max_pages_per_poll,
+            log_prefix="[动态新评论]",
+            notify=True,
+        )
+        if found:
+            changed = True
+    return changed
+
+
+async def _run_cycle_for_up(
+    cfg: AppConfig,
+    root: RootState,
+    state_path: Path,
+    cred: Credential | None,
+    up_mid: int,
+) -> None:
+    state = root.slice_for(up_mid)
+    bvid, title = await _fetch_latest_video(cred, up_mid)
+    up_uname = await _get_up_uname(cred, up_mid)
+    changed = False
+
+    if state.bvid != bvid:
+        logger.info(
+            "[mid=%s] 最新稿件变化: %s -> %s (%s)",
+            up_mid,
+            state.bvid,
+            bvid,
+            title,
+        )
+        state.bvid = bvid
+        state.seen_rpids.clear()
+        state.bootstrapped = False
+        changed = True
+
+    try:
+        changed |= await _poll_comments_for_up(
+            cfg, state, bvid, title, up_mid, up_uname, cred
+        )
+    except Exception:
+        logger.exception("UP mid=%s 评论检查失败", up_mid)
+
+    try:
+        changed |= await _poll_dynamics_for_up(
+            cfg, state, up_uname, cred, up_mid
+        )
+    except Exception:
+        logger.exception("UP mid=%s 动态检查失败", up_mid)
+
+    try:
+        changed |= await _poll_dynamic_comments_for_up(
+            cfg, state, up_uname, cred, up_mid
+        )
+    except Exception:
+        logger.exception("UP mid=%s 动态评论检查失败", up_mid)
+
+    if changed:
         save_state(state_path, root)
 
 
@@ -339,22 +655,32 @@ async def amain(
 
     if rebootstrap:
         for mid in cfg.target_mids:
-            root.slice_for(mid).bootstrapped = False
+            s = root.slice_for(mid)
+            s.bootstrapped = False
+            s.dynamics_bootstrapped = False
+            s.dynamic_comments_bootstrapped = False
         save_state(state_path, root)
-        logger.info("已启用 --rebootstrap：本轮将对各 UP 重新首轮同步（会再次打印历史 [首轮] 行）")
+        logger.info(
+            "已启用 --rebootstrap：本轮将重新首轮同步评论/动态/动态评论"
+            "（会打印 [首轮]/[首轮动态]/[首轮动态评论]）"
+        )
 
     if (
         not rebootstrap
         and cfg.target_mids
         and all(root.slice_for(m).bootstrapped for m in cfg.target_mids)
+        and all(root.slice_for(m).dynamics_bootstrapped for m in cfg.target_mids)
+        and all(
+            root.slice_for(m).dynamic_comments_bootstrapped for m in cfg.target_mids
+        )
     ):
         logger.info(
-            "历史评论只在「首轮同步」打印一次；当前 state 已同步过，故不再刷屏。"
-            " 若要看历史输出可: 删除 state.json，或运行 python monitor.py --rebootstrap"
+            "历史评论/动态只在首轮同步打印一次；当前 state 已同步过。"
+            " 若要看历史输出: 删除 state.json 或 python monitor.py --rebootstrap"
         )
 
     logger.info(
-        "开始监控 UP mids=%s（最多3个），轮询间隔 %ss",
+        "开始监控 UP mids=%s（最多3个）：最新稿评论 + 空间动态 + 动态评论，轮询间隔 %ss",
         cfg.target_mids,
         cfg.poll_interval_seconds,
     )
@@ -371,7 +697,7 @@ async def amain(
 def main() -> None:
     configure_stdio_utf8()
     parser = argparse.ArgumentParser(
-        description="监控最多3个UP各自最新视频下其本人评论，并可选通知"
+        description="监控最多3个UP的最新稿评论、空间动态与动态评论，并可选通知"
     )
     parser.add_argument(
         "-c",
@@ -387,7 +713,7 @@ def main() -> None:
     parser.add_argument(
         "--rebootstrap",
         action="store_true",
-        help="将各 UP 标为未首轮同步，下一轮重新扫描评论并打印 [首轮] 历史行（不写通知）",
+        help="将各 UP 标为未首轮同步，下一轮重新扫描评论/动态/动态评论并打印 [首轮] 历史（不写通知）",
     )
     args = parser.parse_args()
     config_path = Path(args.config)

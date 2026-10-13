@@ -4,9 +4,9 @@
 
 在 **不依赖 B 站开放平台商业接口** 的前提下，周期性完成：
 
-1. 同时监控 **最多 3 个** UP 主（`target_mids`，或兼容单字段 `target_mid`）；对每个 UP 分别取其 **当前最新公开投稿**（按发布时间倒序取 1 条）。
-2. 在各稿件评论区中，识别 **`member.mid` 等于对应 UP `mid` 的评论**（含楼中楼里该 UP 的回复）。
-3. 对 **首次见到的评论**（以 B 站评论 `rpid` 去重）触发通知：**B 站私信**（可选）与 **短信相关通道**（Webhook / Twilio，可选）。
+1. 同时监控 **最多 3 个** UP 主；对每个 UP 分别取其 **当前最新公开投稿** 的评论区，以及 **空间动态**（`User.get_dynamics_new`）。
+2. 在评论区识别 **`member.mid` 等于对应 UP `mid` 的评论**；在动态列表中解析 **`modules.module_dynamic` 等字段的文字**（含图文、转发、投稿卡片标题等）。
+3. 对 **首次见到的评论/动态** 触发通知：评论可走全部通道；**新动态** 终端输出并推 **飞书**。
 
 **非目标**：监听非最新稿、监听普通观众评论、保证评论区全量爬取、绕过风控或破解验证。
 
@@ -51,7 +51,7 @@ flowchart LR
 | `config.py` | **配置模型**：`AppConfig` 及子结构；`load_config(path)` 从 JSON 反序列化（UTF-8）。 |
 | `state_store.py` | **持久化**：`state.json` 内按 UP 分片 `ups[<mid>]`，每片含 `bvid`、`seen_rpids`、`bootstrapped`；兼容旧版单文件扁平结构（仅当配置为 1 个 UP 时自动迁移）。UTF-8、`ensure_ascii=False`。 |
 | `notify_channels.py` | **通知适配**：`send_bilibili_dm`（异步）；`send_sms_webhook` / `send_twilio_sms`（同步 IO，由 `asyncio.to_thread` 调用）。 |
-| `encoding_utils.py` | **终端编码**：Windows 下尽量将控制台与标准流切到 UTF-8，减少中文日志乱码。 |
+| `dynamic_parser.py` | **动态解析**：从 `get_dynamics_new` 的 item 提取 `id_str`、`pub_ts`、富文本/标题 |
 
 ---
 
@@ -96,7 +96,13 @@ flowchart LR
   - Twilio：使用 REST，字段见 `config.example.json` 中 `notify.twilio`（发件号码键名为 `from`，加载后映射为 `TwilioConfig.from_number`）。
 - **飞书**：`notify.feishu_webhook_url` 填群自定义机器人的 Webhook 地址（[添加机器人](https://open.feishu.cn/document/client-docs/bot-v3/add-custom-bot)）。若机器人开启了**签名校验**，将 `feishu_webhook_secret` 设为口令中的密钥；未开启可留空 `""`。程序按飞书文档组装 `msg_type: text` 并可选附带 `timestamp` / `sign`。
 
-各通道失败互不影响（各自 try/except 记日志）。
+| `encoding_utils.py` | **终端编码**：Windows 下尽量将控制台与标准流切到 UTF-8，减少中文日志乱码。 |
+
+### 4.8 动态监控
+
+- 接口：`User(up_mid).get_dynamics_new(offset)`，分页字段 `offset` / `has_more`。
+- 去重键：动态 `id_str`；首轮拉取 **第一页**，**终端只打印最新 1 条**，同页其余 **静默记入基线**（均不推飞书）。
+- **新动态** / **新评论**（bootstrap 完成之后）才调用飞书 webhook。
 
 ---
 

@@ -7,6 +7,10 @@
     "max_pages_per_poll": 3,
     "bootstrap_max_pages": 15
   },
+  "dynamic_scan": {
+    "max_items_per_poll": 20,
+    "max_comment_items_per_poll": 5
+  },
   "credential": {
     "sessdata": "",
     "bili_jct": "",
