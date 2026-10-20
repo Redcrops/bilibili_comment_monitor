@@ -177,6 +177,13 @@ async def _fetch_dynamics(
     return collected[:limit]
 
 
+def _latest_dynamic_item(items: list[dict]) -> dict | None:
+    """按 pub_ts 取时间上最新的一条，避免置顶帖占 items[0]。"""
+    if not items:
+        return None
+    return max(items, key=dynamic_pub_ts)
+
+
 def _commentable_dynamics(items: list[dict], limit: int) -> list[dict]:
     rows: list[dict] = []
     for item in items:
@@ -199,18 +206,19 @@ async def _bootstrap_dynamics(
     items = data.get("items") or []
 
     if items:
-        latest = items[0]
-        did = dynamic_item_id(latest)
-        if did:
-            ts_text = _format_ts(dynamic_pub_ts(latest))
-            body = extract_dynamic_text(latest)
-            logger.info(
-                "[首轮动态] %s %s id=%s %s",
-                up_uname,
-                ts_text,
-                did,
-                body.replace("\n", " ")[:200] or "(无文字)",
-            )
+        latest = _latest_dynamic_item(items)
+        if latest is not None:
+            did = dynamic_item_id(latest)
+            if did:
+                ts_text = _format_ts(dynamic_pub_ts(latest))
+                body = extract_dynamic_text(latest)
+                logger.info(
+                    "[首轮空间动态] %s %s id=%s %s",
+                    up_uname,
+                    ts_text,
+                    did,
+                    body.replace("\n", " ")[:200] or "(无文字)",
+                )
         # 同页其余动态静默记入基线，避免下一轮把历史当成「新动态」推飞书
         for item in items:
             did = dynamic_item_id(item)
@@ -219,7 +227,7 @@ async def _bootstrap_dynamics(
 
     state.dynamics_bootstrapped = True
     logger.info(
-        "动态首轮 UP=%s：终端展示最新 1 条，基线记入 %s 条（不推飞书）",
+        "空间动态首轮 UP=%s：按时间展示最新 1 条，基线记入 %s 条（不推飞书）",
         up_uname,
         len(items),
     )
@@ -231,6 +239,8 @@ async def _poll_dynamics_for_up(
     up_uname: str,
     cred: Credential | None,
     up_mid: int,
+    *,
+    notify_feishu: bool = True,
 ) -> bool:
     if not state.dynamics_bootstrapped:
         await _bootstrap_dynamics(cfg, state, up_mid, up_uname, cred)
@@ -256,7 +266,7 @@ async def _poll_dynamics_for_up(
         body = extract_dynamic_text(item)
         dtype = dynamic_type_label(item)
         logger.info(
-            "[新动态] %s %s id=%s %s %s",
+            "[新空间动态] %s %s id=%s %s %s",
             up_uname,
             ts_text,
             did,
@@ -277,7 +287,8 @@ async def _poll_dynamics_for_up(
             f"{body}\n"
             f"{url}"
         )
-        await _notify_feishu(cfg, text)
+        if notify_feishu:
+            await _notify_feishu(cfg, text)
 
     return bool(new_rows)
 
@@ -319,7 +330,7 @@ async def _bootstrap_comments(
             body = _plain_message((r.get("content") or {}).get("message", ""))
             ts_text = _format_reply_time(r)
             logger.info(
-                "[首轮] %s %s rpid=%s %s",
+                "[首轮视频评论] %s %s rpid=%s %s",
                 up_uname,
                 ts_text,
                 rid,
@@ -329,7 +340,7 @@ async def _bootstrap_comments(
         n += 1
     state.bootstrapped = True
     logger.info(
-        "首轮同步完成 UP=%s 视频=%s 约 %s 页，已记入 UP 评论 %s 条",
+        "视频评论首轮 UP=%s 视频=%s 约 %s 页，已记入 UP 评论 %s 条",
         up_uname,
         bvid,
         n,
@@ -337,7 +348,13 @@ async def _bootstrap_comments(
     )
 
 
-async def _notify(cfg: AppConfig, cred: Credential | None, text: str) -> None:
+async def _notify(
+    cfg: AppConfig,
+    cred: Credential | None,
+    text: str,
+    *,
+    feishu: bool = True,
+) -> None:
     if cfg.notify.bilibili_dm_receiver_uid > 0:
         if not cred or not cred.bili_jct:
             logger.warning("已配置 bilibili_dm_receiver_uid 但缺少 bili_jct，跳过私信")
@@ -358,7 +375,7 @@ async def _notify(cfg: AppConfig, cred: Credential | None, text: str) -> None:
         except Exception:
             logger.exception("短信 Webhook 请求失败")
 
-    if cfg.notify.feishu_webhook_url:
+    if feishu and cfg.notify.feishu_webhook_url:
         try:
             await _notify_feishu(cfg, text)
         except Exception:
@@ -387,6 +404,8 @@ async def _poll_comments_for_up(
     up_mid: int,
     up_uname: str,
     cred: Credential | None,
+    *,
+    notify_feishu: bool = True,
 ) -> bool:
     if not state.bootstrapped:
         await _bootstrap_comments(cfg, state, bvid, up_mid, up_uname, cred)
@@ -416,7 +435,7 @@ async def _poll_comments_for_up(
         body = _plain_message((r.get("content") or {}).get("message", ""))
         ts_text = _format_reply_time(r)
         logger.info(
-            "[新评论] %s %s rpid=%s %s",
+            "[新视频评论] %s %s rpid=%s %s",
             up_uname,
             ts_text,
             rid,
@@ -436,7 +455,7 @@ async def _poll_comments_for_up(
             f"{body}\n"
             f"{url}"
         )
-        await _notify(cfg, cred, text)
+        await _notify(cfg, cred, text, feishu=notify_feishu)
 
     return bool(new_rows)
 
@@ -452,6 +471,7 @@ async def _scan_dynamic_up_comments(
     max_pages: int,
     log_prefix: str,
     notify: bool,
+    notify_feishu: bool = True,
 ) -> list[tuple[dict, dict]]:
     """扫描单条动态评论区 UP 发言；返回 (reply, dynamic_item) 列表。"""
     oid = dynamic_comment_oid(item)
@@ -502,7 +522,7 @@ async def _scan_dynamic_up_comments(
                 f"{body}\n"
                 f"{dynamic_url(dyn)}"
             )
-            await _notify(cfg, cred, text)
+            await _notify(cfg, cred, text, feishu=notify_feishu)
 
     return found
 
@@ -547,6 +567,8 @@ async def _poll_dynamic_comments_for_up(
     up_uname: str,
     cred: Credential | None,
     up_mid: int,
+    *,
+    notify_feishu: bool = True,
 ) -> bool:
     if not state.dynamic_comments_bootstrapped:
         await _bootstrap_dynamic_comments(cfg, state, up_mid, up_uname, cred)
@@ -568,6 +590,7 @@ async def _poll_dynamic_comments_for_up(
             max_pages=cfg.comment_scan.max_pages_per_poll,
             log_prefix="[动态新评论]",
             notify=True,
+            notify_feishu=notify_feishu,
         )
         if found:
             changed = True
@@ -580,6 +603,8 @@ async def _run_cycle_for_up(
     state_path: Path,
     cred: Credential | None,
     up_mid: int,
+    *,
+    notify_feishu: bool = True,
 ) -> None:
     state = root.slice_for(up_mid)
     bvid, title = await _fetch_latest_video(cred, up_mid)
@@ -601,21 +626,28 @@ async def _run_cycle_for_up(
 
     try:
         changed |= await _poll_comments_for_up(
-            cfg, state, bvid, title, up_mid, up_uname, cred
+            cfg,
+            state,
+            bvid,
+            title,
+            up_mid,
+            up_uname,
+            cred,
+            notify_feishu=notify_feishu,
         )
     except Exception:
         logger.exception("UP mid=%s 评论检查失败", up_mid)
 
     try:
         changed |= await _poll_dynamics_for_up(
-            cfg, state, up_uname, cred, up_mid
+            cfg, state, up_uname, cred, up_mid, notify_feishu=notify_feishu
         )
     except Exception:
         logger.exception("UP mid=%s 动态检查失败", up_mid)
 
     try:
         changed |= await _poll_dynamic_comments_for_up(
-            cfg, state, up_uname, cred, up_mid
+            cfg, state, up_uname, cred, up_mid, notify_feishu=notify_feishu
         )
     except Exception:
         logger.exception("UP mid=%s 动态评论检查失败", up_mid)
@@ -629,10 +661,14 @@ async def run_cycle(
     root: RootState,
     state_path: Path,
     cred: Credential | None,
+    *,
+    notify_feishu: bool = True,
 ) -> None:
     for up_mid in cfg.target_mids:
         try:
-            await _run_cycle_for_up(cfg, root, state_path, cred, up_mid)
+            await _run_cycle_for_up(
+                cfg, root, state_path, cred, up_mid, notify_feishu=notify_feishu
+            )
         except Exception:
             logger.exception("UP mid=%s 本轮检查失败", up_mid)
 
@@ -662,7 +698,7 @@ async def amain(
         save_state(state_path, root)
         logger.info(
             "已启用 --rebootstrap：本轮将重新首轮同步评论/动态/动态评论"
-            "（会打印 [首轮]/[首轮动态]/[首轮动态评论]）"
+            "（会打印 [首轮视频评论]/[首轮空间动态]/[首轮动态评论]）"
         )
 
     if (
@@ -684,11 +720,24 @@ async def amain(
         cfg.target_mids,
         cfg.poll_interval_seconds,
     )
+    if cfg.notify.feishu_webhook_url:
+        logger.info("启动后首轮检查仅输出终端日志，不推送飞书")
+    startup_cycle = True
     while True:
         try:
-            await run_cycle(cfg, root, state_path, cred)
+            await run_cycle(
+                cfg,
+                root,
+                state_path,
+                cred,
+                notify_feishu=not startup_cycle,
+            )
         except Exception:
             logger.exception("本轮检查失败")
+        if startup_cycle:
+            startup_cycle = False
+            if cfg.notify.feishu_webhook_url and not once:
+                logger.info("启动首轮检查完成，后续新内容将推送飞书")
         if once:
             break
         await asyncio.sleep(cfg.poll_interval_seconds)
@@ -713,7 +762,7 @@ def main() -> None:
     parser.add_argument(
         "--rebootstrap",
         action="store_true",
-        help="将各 UP 标为未首轮同步，下一轮重新扫描评论/动态/动态评论并打印 [首轮] 历史（不写通知）",
+        help="将各 UP 标为未首轮同步，下一轮重新扫描评论/动态/动态评论并打印首轮历史（不写通知）",
     )
     args = parser.parse_args()
     config_path = Path(args.config)
